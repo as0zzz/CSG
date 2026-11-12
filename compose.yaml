@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgis/postgis:16-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aksg
+      POSTGRES_USER: aksg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U aksg -d aksg]
+      interval: 3s
+      start_period: 120s
+      retries: 60
+  storage:
+    build: ./storage
+    restart: unless-stopped
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+    volumes:
+      - media_data:/data
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://aksg:${POSTGRES_PASSWORD}@db/aksg
+      S3_ENDPOINT: http://storage:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET:?}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?}
+      DEMO_BASE_DATE: ${DEMO_BASE_DATE:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_started
+    command: sh -c 'alembic upgrade head && python -m app.seed && python -m app.plan_seed && uvicorn app.main:app --host 0.0.0.0 --port 8000'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      start_period: 60s
+      retries: 60
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:8080:80'
+    depends_on:
+      api:
+        condition: service_healthy
+volumes:
+  postgres_data:
+  media_data:
