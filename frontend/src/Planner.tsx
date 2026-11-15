@@ -1522,11 +1522,7 @@ export default function Planner() {
                     >
                       {sessions.map((s) => (
                         <option key={s.id} value={s.id}>
-                          {s.mode === "test"
-                            ? "ТЕСТ"
-                            : s.mode === "api"
-                              ? "API"
-                              : "Пользователь"}{" "}
+                          {s.mode === "api" ? "API" : s.mode === "human" ? "Пользователь" : "Архив"}{" "}
                           · {new Date(s.created_at).toLocaleString("ru-RU")} ·{" "}
                           {s.id.slice(0, 8)} · {s.event_count} событий
                         </option>
@@ -1555,7 +1551,7 @@ export default function Planner() {
                     Записываются действия только внутри КСГ: создание и правка
                     работ, перенос полос, изменение связей, поиск, масштаб и
                     прокрутка. Пароли и действия в других приложениях не
-                    собираются. Тестовые сессии помечаются отдельно.
+                    собираются.
                   </p>
                 </div>
                 <div className="trace-table-scroll">

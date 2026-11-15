@@ -1,6 +1,6 @@
 # АКСГ Центр управления строительством
 
-Локальный демонстрационный прототип для ручного ведения КСГ и удалённой проверки материалов строительства железнодорожной инфраструктуры. Проект реализован по `docs/implementation-prompt.md`. Данные, организации, изображения и видео демонстрационного проекта вымышленные.
+Локальный демонстрационный прототип для ручного ведения КСГ и удалённой проверки материалов строительства железнодорожной инфраструктуры. Данные, организации, изображения и видео демонстрационного проекта вымышленные.
 
 ## Запуск на Windows
 
@@ -53,7 +53,6 @@ docker compose logs --tail 100 api
 docker compose stop
 docker compose start
 docker compose exec api python -m app.seed
-docker compose exec api python -m app.test_runner
 ```
 
 Обычная остановка сохраняет данные. БД находится в volume `csg_postgres_data`, материалы — `csg_media_data` при запуске из папки CSG без переопределения имени Compose-проекта.
@@ -67,20 +66,7 @@ docker compose up -d
 
 После сброса seed создаётся заново. `DEMO_BASE_DATE` задаёт опорную дату первоначального заполнения; повторный seed её не переносит. Изменение `DEMO_PASSWORD` после заполнения не меняет хеши существующих пользователей.
 
-## Проверки разработки
-
-Backend проверяется в отдельной временной PostgreSQL-базе с именем `aksg_test_<uuid>`; тестовая база удаляется после запуска. Основная БД не очищается. Тестовые медиа имеют отдельные UUID проекта в общем приватном bucket; автоматическое удаление объектов не применяется.
-
-```powershell
-docker compose exec api python -m app.test_runner
-cd frontend
-npm ci
-npm run typecheck
-npm run lint
-npm run build
-```
-
-Для установки frontend-зависимостей вне Docker нужен Node.js с npm. Сервер разработки `npm run dev` проксирует `/api` на localhost:8000, если API запущен разработчиком на этом порту; штатный полностью настроенный запуск — через Compose на 8080.
+Для установки frontend-зависимостей вне Docker нужен Node.js с npm. Сервер разработки `npm run dev` проксирует `/api` на localhost:8000, если API запущен на этом порту; штатный запуск — через Compose на 8080.
 
 ## Устройство проекта
 
@@ -90,11 +76,10 @@ npm run build
 - `backend/app/services.py` — валидация, граф зависимостей и аудит.
 - `backend/app/main.py` — REST API, защищённое медиа и симулятор.
 - `backend/alembic` — миграции PostgreSQL/PostGIS.
-- `backend/tests` — API-тесты бизнес-инвариантов и доступа.
 - `backend/requirements.lock` — зафиксированные прямые и транзитивные Python-зависимости для Docker-сборки.
 - `frontend/src` — интерфейс React/TypeScript.
 - `storage/Dockerfile` — воспроизводимая сборка MinIO.
-- `docs/scope.md`, `docs/decisions.md`, `docs/acceptance.md` — границы, решения и результаты проверок.
+- `docs/scope.md`, `docs/decisions.md` — границы и принятые решения.
 
 ## Ограничения
 
