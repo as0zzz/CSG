@@ -580,6 +580,49 @@ export default function Planner() {
               Открыть график <ArrowRight size={16} />
             </button>
           </form>
+          <div className="demo-accounts">
+            <span className="demo-accounts-label">Быстрый вход для демо:</span>
+            <div className="demo-buttons">
+              <button
+                type="button"
+                className="demo-account-btn"
+                disabled={busy}
+                onClick={() => {
+                  const creds = {
+                    email: "planner@demo.local",
+                    password: "d7502a427c346a41a47a66f554b9b8a2d5069bbd1b952e26",
+                  };
+                  setLogin(creds);
+                  setBusy(true);
+                  api("/auth/login", "POST", creds)
+                    .then(bootstrap)
+                    .catch((e) => setError(e.message))
+                    .finally(() => setBusy(false));
+                }}
+              >
+                <b>Мария Соколова</b> · Планировщик (создание, связывание, расчёт)
+              </button>
+              <button
+                type="button"
+                className="demo-account-btn"
+                disabled={busy}
+                onClick={() => {
+                  const creds = {
+                    email: "inspector@demo.local",
+                    password: "d7502a427c346a41a47a66f554b9b8a2d5069bbd1b952e26",
+                  };
+                  setLogin(creds);
+                  setBusy(true);
+                  api("/auth/login", "POST", creds)
+                    .then(bootstrap)
+                    .catch((e) => setError(e.message))
+                    .finally(() => setBusy(false));
+                }}
+              >
+                <b>Дмитрий Орлов</b> · Инспектор стройконтроля (только чтение)
+              </button>
+            </div>
+          </div>
           <small>Запись начинается после входа. Пароль не записывается.</small>
         </div>
       </div>
@@ -639,9 +682,39 @@ export default function Planner() {
           <ChevronDown size={14} />
         </div>
         <div className="profile">
-          <span>{user.name}</span>
+          <div className="profile-info">
+            <span className="profile-name">{user.name}</span>
+            <span
+              className={`profile-badge ${
+                user.email === "planner@demo.local" || editable
+                  ? "badge-planner"
+                  : user.email === "inspector@demo.local"
+                  ? "badge-inspector"
+                  : user.email === "admin@demo.local"
+                  ? "badge-admin"
+                  : user.email === "customer@demo.local"
+                  ? "badge-customer"
+                  : user.email === "contractor@demo.local"
+                  ? "badge-contractor"
+                  : "badge-inspector"
+              }`}
+            >
+              {user.email === "planner@demo.local" || editable
+                ? "Планировщик · Редактирование КСГ"
+                : user.email === "inspector@demo.local"
+                ? "Инспектор · Только чтение"
+                : user.email === "admin@demo.local"
+                ? "Администратор · Управление"
+                : user.email === "customer@demo.local"
+                ? "Заказчик · Просмотр и приёмка"
+                : user.email === "contractor@demo.local"
+                ? "Генподрядчик · Исполнение"
+                : "Только чтение"}
+            </span>
+          </div>
           <button
             className="ksg-icon"
+            title="Выйти из системы"
             aria-label="Выйти"
             onClick={async () => {
               await recorder.current?.stop();
@@ -713,16 +786,16 @@ export default function Planner() {
         ) : (
           <>
             <div className="board-heading">
-              <div>
-                <span className="eyebrow">РАБОЧИЙ ГРАФИК</span>
+              <div className="board-title-group">
                 <h1>{plan.project.name}</h1>
-                <p>
-                  {tasks.length} работ <span>·</span> {duration} календарных
-                  дней <span>·</span> {plan.links.length} связей
-                </p>
+                <div className="board-stats-chips">
+                  <span className="stats-chip">{tasks.length} работ</span>
+                  <span className="stats-chip">{duration} дн.</span>
+                  <span className="stats-chip">{plan.links.length} связей</span>
+                </div>
               </div>
               <button
-                className="ksg-button new-project"
+                className="ksg-button new-project compact"
                 onClick={() =>
                   setPopup({
                     kind: "project",
@@ -737,10 +810,18 @@ export default function Planner() {
                   )
                 }
               >
-                <Plus size={16} />
+                <Plus size={15} />
                 Новый график
               </button>
             </div>
+            {view !== "recorder" && !editable && (
+              <div className="readonly-banner">
+                <ShieldCheck size={16} />
+                <span>
+                  Режим <b>«Только чтение»</b> ({user.name}). Создание, редактирование и связывание работ доступны роли <b>«Планировщик»</b> (Мария Соколова).
+                </span>
+              </div>
+            )}
             {view !== "recorder" && (
               <div className="ksg-toolbar">
                 <div className="toolbar-group">
@@ -1187,23 +1268,23 @@ export default function Planner() {
                         <defs>
                           <marker
                             id="gantt-arrow"
-                            markerWidth="6"
-                            markerHeight="6"
+                            markerWidth="7"
+                            markerHeight="7"
                             refX="5"
-                            refY="3"
+                            refY="3.5"
                             orient="auto"
                           >
-                            <path d="M0 0 L6 3 L0 6" fill="#8fa18d" />
+                            <path d="M0 0 L7 3.5 L0 7" fill="#475569" />
                           </marker>
                           <marker
                             id="gantt-warning"
-                            markerWidth="6"
-                            markerHeight="6"
+                            markerWidth="7"
+                            markerHeight="7"
                             refX="5"
-                            refY="3"
+                            refY="3.5"
                             orient="auto"
                           >
-                            <path d="M0 0 L6 3 L0 6" fill="#bf8953" />
+                            <path d="M0 0 L7 3.5 L0 7" fill="#dc2626" />
                           </marker>
                         </defs>
                         {plan.links.map((link) => {
@@ -1228,7 +1309,10 @@ export default function Planner() {
                             <path
                               key={link.id}
                               d={d}
-                              stroke={warning ? "#bf8953" : "#8fa18d"}
+                              fill="none"
+                              stroke={warning ? "#dc2626" : "#475569"}
+                              strokeWidth={1.8}
+                              strokeLinejoin="round"
                               markerEnd={`url(#${warning ? "gantt-warning" : "gantt-arrow"})`}
                             />
                           );
@@ -1325,13 +1409,13 @@ export default function Planner() {
                         <defs>
                           <marker
                             id="net-arrow"
-                            markerWidth="7"
-                            markerHeight="7"
-                            refX="6"
-                            refY="3.5"
+                            markerWidth="8"
+                            markerHeight="8"
+                            refX="7"
+                            refY="4"
                             orient="auto"
                           >
-                            <path d="M0 0 L7 3.5 L0 7" fill="#91a38e" />
+                            <path d="M0 0 L8 4 L0 8" fill="#475569" />
                           </marker>
                         </defs>
                         {plan.links.map((l) => {
@@ -1347,8 +1431,8 @@ export default function Planner() {
                               key={l.id}
                               d={`M${a.x + 180} ${a.y + 35} C${a.x + 210} ${a.y + 35},${b.x - 30} ${b.y + 35},${b.x - 5} ${b.y + 35}`}
                               fill="none"
-                              stroke={critical ? "#366c49" : "#b0bca9"}
-                              strokeWidth={critical ? 2 : 1.5}
+                              stroke={critical ? "#dc2626" : "#64748b"}
+                              strokeWidth={critical ? 2.5 : 1.8}
                               markerEnd="url(#net-arrow)"
                             />
                           );
