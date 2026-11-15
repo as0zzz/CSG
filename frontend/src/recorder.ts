@@ -93,10 +93,7 @@ export class Recorder {
     public observe: () => Json,
     private onStatus: (s: Status) => void,
   ) {
-    this.mode =
-      new URLSearchParams(location.search).get("recording") === "test"
-        ? "test"
-        : "human";
+    this.mode = "human";
     const key = `ksg-session:${user}:${project}:${this.mode}`;
     let prior: { id: string; seq: number } | null = null;
     try {
@@ -122,7 +119,7 @@ export class Recorder {
       await post(`/projects/${this.project}/recorder/sessions`, {
         id: this.id,
         mode: this.mode,
-        label: this.mode === "test" ? "Тест интерфейса" : "Рабочая сессия",
+        label: "Рабочая сессия",
         view: this.observe(),
       });
       if (this.stopped) return;

@@ -37,7 +37,7 @@ class RecalculateInput(Input):
 
 class SessionInput(Input):
     id: UUID
-    mode: Literal['human', 'test'] = 'human'
+    mode: Literal['human'] = 'human'
     label: str = Field(default='Рабочая сессия', max_length=150)
     view: dict = Field(default_factory=dict)
 
