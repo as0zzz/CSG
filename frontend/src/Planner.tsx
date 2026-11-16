@@ -48,6 +48,14 @@ const names: Record<string, string> = {
   "action.failed": "Ошибка действия",
   "task.create": "Создание работы",
   "task.update": "Изменение работы",
+  "task.schedule": "Изменение срока",
+  "task.status": "Изменение статуса",
+  "task.quantity": "Изменение объёма",
+  "task.stationing": "Изменение места / пикетажа",
+  "task.assignment": "Изменение ответственного",
+  "task.classification": "Изменение раздела КСГ",
+  "task.move": "Перенос работы",
+  "task.resize": "Изменение длительности",
   "task.archive": "Удаление из графика",
   "schedule.recalculate": "Расчёт по связям",
   "session.resume": "Открытие сессии",
@@ -57,6 +65,19 @@ const names: Record<string, string> = {
   "export.requested": "Выгрузка записи",
   "dependency.edit": "Изменение связей",
 };
+const statusNames: Record<Task["status"], string> = {
+  planned: "Запланирована",
+  in_progress: "В работе",
+  suspended: "Приостановлена",
+  completed: "Завершена",
+};
+const statusOptions: { value: Task["status"]; label: string }[] = [
+  { value: "planned", label: statusNames.planned },
+  { value: "in_progress", label: statusNames.in_progress },
+  { value: "suspended", label: statusNames.suspended },
+  { value: "completed", label: statusNames.completed },
+];
+const units: Task["unit"][] = ["м", "м³", "м²", "шт", "т"];
 const nowDate = () => new Date().toLocaleDateString("sv-SE");
 const EMPTY_STATUS = {
   ready: false,
@@ -69,11 +90,219 @@ const EMPTY_STATUS = {
 const inputTask = (t: Task) => ({
   code: t.code,
   title: t.title,
+  section: t.section,
+  contractor_id: t.contractor_id,
+  responsible_id: t.responsible_id,
+  linear: t.linear,
+  axis_id: t.axis_id,
+  start_m: t.start_m,
+  end_m: t.end_m,
+  location: t.location,
   start_date: t.start_date,
   duration_days: t.duration_days,
+  actual_start: t.actual_start,
+  actual_end: t.actual_end,
+  unit: t.unit,
+  planned: t.planned,
+  status: t.status,
+  reason: "",
   predecessor_ids: t.predecessor_ids,
   version: t.version,
 });
+const fieldNames: Record<string, string> = {
+  code: "Код",
+  title: "Название",
+  section: "Раздел",
+  contractor_id: "Подрядчик",
+  responsible_id: "Ответственный",
+  linear: "Тип места",
+  axis_id: "Ось / путь",
+  start_m: "Начальный пикет",
+  end_m: "Конечный пикет",
+  location: "Место выполнения",
+  start_date: "Начало по плану",
+  end_date: "Окончание по плану",
+  duration_days: "Длительность",
+  actual_start: "Фактическое начало",
+  actual_end: "Фактическое окончание",
+  unit: "Единица объёма",
+  planned: "Плановый объём",
+  status: "Статус",
+  predecessor_ids: "Предшествующие работы",
+};
+function eventSummary(event: Obj) {
+  const payload = event.payload || {};
+  if (payload.entity === "dependency") {
+    const added = payload.added?.length || 0;
+    const removed = payload.removed?.length || 0;
+    return [added ? `Добавлено связей: ${added}` : "", removed ? `Удалено связей: ${removed}` : ""]
+      .filter(Boolean).join(" · ") || "Связи без изменений";
+  }
+  const changes = payload.change_set as Obj[] | undefined;
+  if (changes?.length) {
+    const names = [...new Set(changes.flatMap((change) => Object.keys(change.fields || {})))];
+    const operations = changes.filter((change) => change.operation === "created" || change.operation === "removed");
+    const labels = names.map((name) => fieldNames[name] || name);
+    if (operations.some((change) => change.operation === "created")) labels.unshift("Создана работа");
+    if (operations.some((change) => change.operation === "removed")) labels.unshift("Убрана работа");
+    if (changes.some((change) => change.entity === "dependency")) labels.push("Изменены связи");
+    return [...new Set(labels)].join(" · ") || "Изменение графика";
+  }
+  return payload.code || payload.target || payload.kind || payload.operation || payload.field || event.result?.error || "—";
+}
+function eventLabel(event: Obj) {
+  const completedKind = event.kind === "action.succeeded" ? event.payload?.kind : null;
+  const kind = completedKind || event.kind;
+  const label = names[kind] || kind;
+  return completedKind ? `${label} · выполнено` : label;
+}
+
+type NetworkNodePosition = { id: string; x: number; y: number };
+type NetworkPoint = [number, number];
+type NetworkSegment = { from: NetworkPoint; to: NetworkPoint };
+
+function roundedOrthogonalPath(points: NetworkPoint[], radius = 7) {
+  const format = (value: number) => value.toFixed(1);
+  let path = `M${format(points[0][0])} ${format(points[0][1])}`;
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const [x, y] = points[i];
+    const [prevX, prevY] = points[i - 1];
+    const [nextX, nextY] = points[i + 1];
+    const inX = x - prevX;
+    const inY = y - prevY;
+    const outX = nextX - x;
+    const outY = nextY - y;
+    const inLength = Math.hypot(inX, inY);
+    const outLength = Math.hypot(outX, outY);
+    if (inLength < 0.1 || outLength < 0.1) continue;
+
+    const bend = Math.min(radius, inLength / 2, outLength / 2);
+    path += ` L${format(x - (inX / inLength) * bend)} ${format(y - (inY / inLength) * bend)}`;
+    path += ` Q${format(x)} ${format(y)} ${format(x + (outX / outLength) * bend)} ${format(y + (outY / outLength) * bend)}`;
+  }
+
+  const [lastX, lastY] = points[points.length - 1];
+  return `${path} L${format(lastX)} ${format(lastY)}`;
+}
+
+function segmentHitsNode(
+  from: NetworkPoint,
+  to: NetworkPoint,
+  node: NetworkNodePosition,
+) {
+  const left = node.x - 9;
+  const right = node.x + 189;
+  const top = node.y - 9;
+  const bottom = node.y + 79;
+
+  if (Math.abs(from[1] - to[1]) < 0.1) {
+    const low = Math.min(from[0], to[0]);
+    const high = Math.max(from[0], to[0]);
+    return from[1] > top && from[1] < bottom && high > left && low < right;
+  }
+  if (Math.abs(from[0] - to[0]) < 0.1) {
+    const low = Math.min(from[1], to[1]);
+    const high = Math.max(from[1], to[1]);
+    return from[0] > left && from[0] < right && high > top && low < bottom;
+  }
+  return true;
+}
+
+function pathCrossingCost(points: NetworkPoint[], routed: NetworkSegment[]) {
+  let cost = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) < 0.1) continue;
+    for (const segment of routed) {
+      const c = segment.from;
+      const d = segment.to;
+      if (Math.abs(c[0] - d[0]) + Math.abs(c[1] - d[1]) < 0.1) continue;
+      const aHorizontal = Math.abs(a[1] - b[1]) < 0.1;
+      const cHorizontal = Math.abs(c[1] - d[1]) < 0.1;
+
+      if (aHorizontal && cHorizontal && Math.abs(a[1] - c[1]) < 0.1) {
+        const overlap = Math.min(Math.max(a[0], b[0]), Math.max(c[0], d[0])) -
+          Math.max(Math.min(a[0], b[0]), Math.min(c[0], d[0]));
+        if (overlap > 2) cost += 500 + overlap * 2;
+        continue;
+      }
+      if (!aHorizontal && !cHorizontal && Math.abs(a[0] - c[0]) < 0.1) {
+        const overlap = Math.min(Math.max(a[1], b[1]), Math.max(c[1], d[1])) -
+          Math.max(Math.min(a[1], b[1]), Math.min(c[1], d[1]));
+        if (overlap > 2) cost += 500 + overlap * 2;
+        continue;
+      }
+
+      const horizontal = aHorizontal ? [a, b] : [c, d];
+      const vertical = aHorizontal ? [c, d] : [a, b];
+      const crosses =
+        Math.min(horizontal[0][0], horizontal[1][0]) <= vertical[0][0] &&
+        vertical[0][0] <= Math.max(horizontal[0][0], horizontal[1][0]) &&
+        Math.min(vertical[0][1], vertical[1][1]) <= horizontal[0][1] &&
+        horizontal[0][1] <= Math.max(vertical[0][1], vertical[1][1]);
+      if (crosses) cost += 180;
+    }
+  }
+  return cost;
+}
+
+function networkLinkPoints(
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number,
+  obstacles: NetworkNodePosition[],
+  routed: NetworkSegment[],
+) {
+  const score = (points: NetworkPoint[]) => {
+    let length = 0;
+    for (let i = 1; i < points.length; i++) {
+      length += Math.abs(points[i][0] - points[i - 1][0]) +
+        Math.abs(points[i][1] - points[i - 1][1]);
+    }
+    return length + Math.max(0, points.length - 2) * 8 +
+      pathCrossingCost(points, routed);
+  };
+
+  if (!obstacles.length) {
+    const bendXs = [sx + (tx - sx) / 2, sx + 14, tx - 14];
+    return bendXs
+      .map((bendX) => [[sx, sy], [bendX, sy], [bendX, ty], [tx, ty]] as NetworkPoint[])
+      .sort((left, right) => score(left) - score(right))[0];
+  }
+
+  const exitX = sx + 14;
+  const entryX = tx - 14;
+  const boundaries = obstacles
+    .flatMap((node) => [node.y - 14, node.y + 84])
+    .sort((a, b) => a - b);
+  const lanes = new Set([sy, ty, (sy + ty) / 2, ...boundaries]);
+  for (let i = 1; i < boundaries.length; i++) {
+    if (boundaries[i] - boundaries[i - 1] > 18)
+      lanes.add((boundaries[i] + boundaries[i - 1]) / 2);
+  }
+
+  const candidates = [...lanes].map((laneY) => [
+    [sx, sy],
+    [exitX, sy],
+    [exitX, laneY],
+    [entryX, laneY],
+    [entryX, ty],
+    [tx, ty],
+  ] as NetworkPoint[]);
+  const valid = candidates.filter((points) => {
+    for (let i = 1; i < points.length; i++) {
+      if (obstacles.some((node) => segmentHitsNode(points[i - 1], points[i], node)))
+        return false;
+    }
+    return true;
+  });
+
+  return (valid.length ? valid : candidates)
+    .sort((left, right) => score(left) - score(right))[0];
+}
 
 export default function Planner() {
   const [user, setUser] = useState<Obj | null>(null),
@@ -159,9 +388,23 @@ export default function Planner() {
       .map((t) => ({
         id: t.id,
         code: t.code,
+        title: t.title,
+        section: t.section,
+        contractor_id: t.contractor_id,
+        responsible_id: t.responsible_id,
+        linear: t.linear,
+        axis_id: t.axis_id,
+        start_m: t.start_m,
+        end_m: t.end_m,
+        location: t.location,
         start: t.start_date,
         end: t.end_date,
         duration: t.duration_days,
+        actual_start: t.actual_start,
+        actual_end: t.actual_end,
+        unit: t.unit,
+        planned: t.planned,
+        status: t.status,
         predecessors: t.predecessor_ids,
         version: t.version,
       })),
@@ -251,10 +494,6 @@ export default function Planner() {
   useEffect(() => {
     const node = document.querySelector<HTMLElement>('[data-editor="true"]');
     if (!node) return;
-    const focus = node.querySelector<HTMLElement>(
-      'input[name="title"], input, select',
-    );
-    focus?.focus();
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busyRef.current) {
         setPopup(null);
@@ -296,13 +535,21 @@ export default function Planner() {
       if (!response.ok)
         throw new Error(result.detail || "Не удалось сохранить график");
       if (result.tasks) {
+        const previousIds = new Set((plan?.tasks || []).map((task) => task.id));
+        const changedTask = old
+          ? result.tasks.find((task: Task) => task.id === old.id)
+          : result.tasks.find((task: Task) => !previousIds.has(task.id));
         applyPlan(result);
         if (old) setUndo(old);
+        await record(
+          "action.succeeded",
+          { kind, task_id: changedTask?.id || old?.id || null, code: changedTask?.code || null },
+          action,
+          { ok: true, task_id: changedTask?.id || old?.id || null },
+        );
+      } else {
+        await record("action.succeeded", { kind }, action, { ok: true });
       }
-      await record("action.succeeded", { kind }, action, {
-        ok: true,
-        task_id: old?.id,
-      });
       await recorder.current.flush();
       setEditor(null);
       setPopup(null);
@@ -333,12 +580,28 @@ export default function Planner() {
     let n = 1;
     const code = (i: number) => String(i).padStart(2, "0");
     while (codes.has(code(n))) n++;
+    const options = plan?.options;
+    const axis = options?.axes[0];
     setSelected("");
     setEditor({
       code: code(n),
       title: "",
+      section: "Основные работы",
+      contractor_id: options?.contractors[0]?.id || "",
+      responsible_id: user?.id || options?.responsibles[0]?.id || "",
+      linear: !!axis,
+      axis_id: axis?.id || null,
+      start_m: axis?.start_m ?? null,
+      end_m: axis ? Math.min(axis.start_m + 100, axis.end_m) : null,
+      location: "",
       start_date: startDate || iso(start),
       duration_days: 1,
+      actual_start: null,
+      actual_end: null,
+      unit: "м",
+      planned: "100",
+      status: "planned",
+      reason: "",
       predecessor_ids: [],
       version: 1,
     });
@@ -363,7 +626,7 @@ export default function Planner() {
       if (target) {
         setTraceId(target);
         const data = await api(
-          `/projects/${pid}/recorder/sessions/${target}/events?limit=500`,
+          `/projects/${pid}/recorder/sessions/${target}/events?limit=500&latest=true`,
         );
         setEvents(data.items);
         setEventCount(data.total);
@@ -1104,13 +1367,18 @@ export default function Planner() {
                               <b className="task-code">{t.code}</b>
                               <button
                                 className="task-title"
-                                title={t.title}
+                                title={`${t.title}\n${t.planned} ${t.unit} · ${t.linear ? `${t.start_m ?? "—"}–${t.end_m ?? "—"} м` : t.location || "Место не указано"} · ${statusNames[t.status]}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   selectTask(source, true);
                                 }}
                               >
-                                {t.title}
+                                <span>{t.title}</span>
+                                <small>
+                                  {t.planned} {t.unit} · {t.linear
+                                    ? `${t.start_m ?? "—"}–${t.end_m ?? "—"} м`
+                                    : t.location || "Место не указано"} · {statusNames[t.status]}
+                                </small>
                               </button>
                               <span className="task-duration">
                                 {t.duration_days}
@@ -1409,34 +1677,132 @@ export default function Planner() {
                         <defs>
                           <marker
                             id="net-arrow"
-                            markerWidth="8"
-                            markerHeight="8"
-                            refX="7"
-                            refY="4"
+                            markerUnits="userSpaceOnUse"
+                            viewBox="0 0 12 12"
+                            markerWidth="12"
+                            markerHeight="12"
+                            refX="1"
+                            refY="6"
                             orient="auto"
                           >
-                            <path d="M0 0 L8 4 L0 8" fill="#475569" />
+                            <path d="M1 1 L11 6 L1 11 Z" fill="#64748b" />
+                          </marker>
+                          <marker
+                            id="net-arrow-critical"
+                            markerUnits="userSpaceOnUse"
+                            viewBox="0 0 12 12"
+                            markerWidth="12"
+                            markerHeight="12"
+                            refX="1"
+                            refY="6"
+                            orient="auto"
+                          >
+                            <path d="M1 1 L11 6 L1 11 Z" fill="#dc2626" />
                           </marker>
                         </defs>
-                        {plan.links.map((l) => {
-                          const a = positions.get(l.from),
-                            b = positions.get(l.to);
-                          if (!a || !b) return null;
-                          const critical =
-                            criticalOn &&
-                            metrics.critical.has(l.from) &&
-                            metrics.critical.has(l.to);
-                          return (
-                            <path
-                              key={l.id}
-                              d={`M${a.x + 180} ${a.y + 35} C${a.x + 210} ${a.y + 35},${b.x - 30} ${b.y + 35},${b.x - 5} ${b.y + 35}`}
-                              fill="none"
-                              stroke={critical ? "#dc2626" : "#64748b"}
-                              strokeWidth={critical ? 2.5 : 1.8}
-                              markerEnd="url(#net-arrow)"
-                            />
+                        {(() => {
+                          const fromMap = new Map<string, typeof plan.links>();
+                          const toMap = new Map<string, typeof plan.links>();
+                          plan.links.forEach((l) => {
+                            if (positions.has(l.from) && positions.has(l.to)) {
+                              fromMap.set(l.from, [...(fromMap.get(l.from) || []), l]);
+                              toMap.set(l.to, [...(toMap.get(l.to) || []), l]);
+                            }
+                          });
+                          fromMap.forEach((list) =>
+                            list.sort(
+                              (x, y) => positions.get(x.to)!.y - positions.get(y.to)!.y,
+                            ),
                           );
-                        })}
+                          toMap.forEach((list) =>
+                            list.sort(
+                              (x, y) => positions.get(x.from)!.y - positions.get(y.from)!.y,
+                            ),
+                          );
+                          const allNodes = [...positions.entries()].map(([id, pos]) => ({
+                            id,
+                            ...pos,
+                          }));
+                          const orderedLinks = plan.links
+                            .filter((link) => positions.has(link.from) && positions.has(link.to))
+                            .sort((left, right) => {
+                              const leftSpan = positions.get(left.to)!.x - positions.get(left.from)!.x;
+                              const rightSpan = positions.get(right.to)!.x - positions.get(right.from)!.x;
+                              return leftSpan - rightSpan;
+                            });
+                          const routedSegments: NetworkSegment[] = [];
+
+                          return orderedLinks.map((l) => {
+                            const a = positions.get(l.from),
+                              b = positions.get(l.to);
+                            if (!a || !b) return null;
+                            const critical =
+                              criticalOn &&
+                              metrics.critical.has(l.from) &&
+                              metrics.critical.has(l.to);
+
+                            const outList = fromMap.get(l.from) || [l];
+                            const inList = toMap.get(l.to) || [l];
+                            const outIdx = outList.indexOf(l);
+                            const inIdx = inList.indexOf(l);
+                            const syOffset =
+                              outList.length > 1
+                                ? (outIdx - (outList.length - 1) / 2) * 14
+                                : 0;
+                            const tyOffset =
+                              inList.length > 1
+                                ? (inIdx - (inList.length - 1) / 2) * 14
+                                : 0;
+
+                            const sx = a.x + 180,
+                              sy = a.y + 35 + syOffset,
+                              tx = b.x,
+                              ty = b.y + 35 + tyOffset,
+                              endX = tx - 14;
+
+                            const obstacles = allNodes.filter(
+                              (p) =>
+                                p.id !== l.from &&
+                                p.id !== l.to &&
+                                p.x > a.x + 50 &&
+                                p.x + 180 < b.x - 20,
+                            );
+
+                            const points = networkLinkPoints(
+                              sx,
+                              sy,
+                              endX,
+                              ty,
+                              obstacles,
+                              routedSegments,
+                            );
+                            for (let i = 1; i < points.length; i++) {
+                              if (
+                                Math.abs(points[i][0] - points[i - 1][0]) +
+                                  Math.abs(points[i][1] - points[i - 1][1]) <
+                                0.1
+                              )
+                                continue;
+                              routedSegments.push({
+                                from: points[i - 1],
+                                to: points[i],
+                              });
+                            }
+                            const d = roundedOrthogonalPath(points);
+
+                            return (
+                              <path
+                                key={l.id}
+                                d={d}
+                                fill="none"
+                                stroke={critical ? "#dc2626" : "#64748b"}
+                                strokeWidth={critical ? 2.4 : 1.8}
+                                strokeLinejoin="round"
+                                markerEnd={`url(#${critical ? "net-arrow-critical" : "net-arrow"})`}
+                              />
+                            );
+                          });
+                        })()}
                         {visible.map((t) => {
                           const p = positions.get(t.id)!;
                           return (
@@ -1548,10 +1914,10 @@ export default function Planner() {
                 <div className="recording-explainer">
                   <ShieldCheck size={18} />
                   <p>
-                    Записываются действия только внутри КСГ: создание и правка
-                    работ, перенос полос, изменение связей, поиск, масштаб и
-                    прокрутка. Пароли и действия в других приложениях не
-                    собираются.
+                    Записываются действия только внутри КСГ: создание работ,
+                    сроки, статус, объём, пикетаж, ответственные и связи. Для
+                    изменений сохраняются пользователь, время и состояние до
+                    и после. Пароли и действия в других приложениях не собираются.
                   </p>
                 </div>
                 <div className="trace-table-scroll">
@@ -1573,10 +1939,13 @@ export default function Planner() {
                           <td>
                             {new Date(
                               e.client_at || e.received_at,
-                            ).toLocaleTimeString("ru-RU")}
+                            ).toLocaleString("ru-RU", {
+                              dateStyle: "short",
+                              timeStyle: "medium",
+                            })}
                           </td>
                           <td>
-                            <b>{names[e.kind] || e.kind}</b>
+                            <b>{eventLabel(e)}</b>
                             <small>{e.kind}</small>
                           </td>
                           <td>
@@ -1585,13 +1954,7 @@ export default function Planner() {
                             </span>
                           </td>
                           <td>
-                            {e.payload.code ||
-                              e.payload.target ||
-                              e.payload.kind ||
-                              e.payload.operation ||
-                              e.payload.field ||
-                              e.result.error ||
-                              "—"}
+                            {eventSummary(e)}
                             {e.result.ok === true && (
                               <span className="success-word"> · успешно</span>
                             )}
@@ -1617,7 +1980,8 @@ export default function Planner() {
                 <div className="trace-foot">
                   <span>
                     Показано {events.length} из {eventCount}. В выгрузку входят
-                    все события выбранной сессии.
+                    все события выбранной сессии. Новые события сверху,
+                    обновление каждые 5 секунд.
                   </span>
                   <span>Формат: aksg.behavior.v1</span>
                 </div>
@@ -1657,8 +2021,26 @@ export default function Planner() {
                 {
                   code: editor.code,
                   title: editor.title,
+                  section: editor.section,
+                  contractor_id: editor.contractor_id || null,
+                  responsible_id: editor.responsible_id || null,
+                  linear: !!editor.linear,
+                  axis_id: editor.linear ? editor.axis_id || null : null,
+                  start_m: editor.linear && editor.start_m !== "" && editor.start_m != null
+                    ? Number(editor.start_m)
+                    : null,
+                  end_m: editor.linear && editor.end_m !== "" && editor.end_m != null
+                    ? Number(editor.end_m)
+                    : null,
+                  location: editor.linear ? "" : editor.location,
                   start_date: editor.start_date,
                   duration_days: Number(editor.duration_days),
+                  actual_start: editor.actual_start || null,
+                  actual_end: editor.actual_end || null,
+                  unit: editor.unit,
+                  planned: String(editor.planned),
+                  status: editor.status,
+                  reason: editor.reason || "",
                   predecessor_ids: editor.predecessor_ids,
                   version: editor.version,
                 },
@@ -1677,6 +2059,18 @@ export default function Planner() {
                 required
                 maxLength={250}
                 placeholder="Например, укладка рельсошпальной решётки"
+                disabled={!editable}
+              />
+            </label>
+            <label>
+              Раздел КСГ
+              <input
+                name="section"
+                value={editor.section}
+                onChange={(e) => setEditor({ ...editor, section: e.target.value })}
+                required
+                maxLength={200}
+                placeholder="Например, земляное полотно"
                 disabled={!editable}
               />
             </label>
@@ -1738,6 +2132,211 @@ export default function Planner() {
                   : "—"}
               </b>
             </div>
+            <div className="editor-grid">
+              <label>
+                Плановый объём
+                <input
+                  name="planned"
+                  type="number"
+                  min="0.001"
+                  max="99999999999.999"
+                  step="0.001"
+                  value={editor.planned}
+                  onChange={(e) => setEditor({ ...editor, planned: e.target.value })}
+                  required
+                  disabled={!editable}
+                />
+              </label>
+              <label>
+                Единица
+                <select
+                  name="unit"
+                  value={editor.unit}
+                  onChange={(e) => setEditor({ ...editor, unit: e.target.value })}
+                  disabled={!editable}
+                >
+                  {units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                </select>
+              </label>
+            </div>
+            <label>
+              Статус
+              <select
+                name="status"
+                value={editor.status}
+                onChange={(e) => {
+                  const status = e.target.value;
+                  setEditor({
+                    ...editor,
+                    status,
+                    actual_start: status === "planned" ? null : editor.actual_start,
+                    actual_end: status === "completed" ? editor.actual_end : null,
+                  });
+                }}
+                disabled={!editable}
+              >
+                {statusOptions.map((status) => (
+                  <option key={status.value} value={status.value}>{status.label}</option>
+                ))}
+              </select>
+            </label>
+            <div className="editor-grid">
+              <label>
+                Подрядчик
+                <select
+                  name="contractor_id"
+                  value={editor.contractor_id || ""}
+                  onChange={(e) => setEditor({ ...editor, contractor_id: e.target.value })}
+                  disabled={!editable || plan?.options.contractors.length === 0}
+                >
+                  <option value="">Основной подрядчик</option>
+                  {plan?.options.contractors.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Ответственный
+                <select
+                  name="responsible_id"
+                  value={editor.responsible_id || ""}
+                  onChange={(e) => setEditor({ ...editor, responsible_id: e.target.value })}
+                  required
+                  disabled={!editable}
+                >
+                  {plan?.options.responsibles.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="linear-toggle">
+              <input
+                name="linear"
+                type="checkbox"
+                checked={!!editor.linear}
+                disabled={!editable || plan?.options.axes.length === 0}
+                onChange={(e) => {
+                  const linear = e.target.checked;
+                  const axis = plan?.options.axes.find((item) => item.id === editor.axis_id) || plan?.options.axes[0];
+                  setEditor({
+                    ...editor,
+                    linear,
+                    axis_id: linear ? axis?.id || null : null,
+                    start_m: linear ? axis?.start_m ?? null : null,
+                    end_m: linear ? Math.min((axis?.start_m || 0) + 100, axis?.end_m || 100) : null,
+                  });
+                }}
+              />
+              <span>Линейная работа с пикетажем</span>
+            </label>
+            {editor.linear ? (
+              <>
+                <label>
+                  Ось / путь
+                  <select
+                    name="axis_id"
+                    value={editor.axis_id || ""}
+                    onChange={(e) => {
+                      const axis = plan?.options.axes.find((item) => item.id === e.target.value);
+                      setEditor({
+                        ...editor,
+                        axis_id: e.target.value || null,
+                        start_m: axis?.start_m ?? null,
+                        end_m: axis ? Math.min(axis.start_m + 100, axis.end_m) : null,
+                      });
+                    }}
+                    required
+                    disabled={!editable}
+                  >
+                    {plan?.options.axes.map((axis) => (
+                      <option key={axis.id} value={axis.id}>{axis.name} · путь {axis.path}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="editor-grid">
+                  <label>
+                    Начальный пикет, м
+                    <input
+                      name="start_m"
+                      type="number"
+                      min={plan?.options.axes.find((axis) => axis.id === editor.axis_id)?.start_m ?? 0}
+                      max={plan?.options.axes.find((axis) => axis.id === editor.axis_id)?.end_m}
+                      step={1}
+                      value={editor.start_m ?? ""}
+                      onChange={(e) => setEditor({ ...editor, start_m: e.target.value })}
+                      required
+                      disabled={!editable}
+                    />
+                  </label>
+                  <label>
+                    Конечный пикет, м
+                    <input
+                      name="end_m"
+                      type="number"
+                      min={editor.start_m ?? 0}
+                      max={plan?.options.axes.find((axis) => axis.id === editor.axis_id)?.end_m}
+                      step={1}
+                      value={editor.end_m ?? ""}
+                      onChange={(e) => setEditor({ ...editor, end_m: e.target.value })}
+                      required
+                      disabled={!editable}
+                    />
+                  </label>
+                </div>
+              </>
+            ) : (
+              <label>
+                Место выполнения
+                <input
+                  name="location"
+                  value={editor.location}
+                  onChange={(e) => setEditor({ ...editor, location: e.target.value })}
+                  required
+                  maxLength={500}
+                  placeholder="Площадка, сооружение или участок"
+                  disabled={!editable}
+                />
+              </label>
+            )}
+            <div className="editor-grid">
+              <label>
+                Фактическое начало
+                <input
+                  name="actual_start"
+                  type="date"
+                  value={editor.actual_start || ""}
+                  onChange={(e) => setEditor({ ...editor, actual_start: e.target.value || null })}
+                  required={editor.status === "in_progress" || editor.status === "completed"}
+                  disabled={!editable}
+                />
+              </label>
+              <label>
+                Фактическое окончание
+                <input
+                  name="actual_end"
+                  type="date"
+                  value={editor.actual_end || ""}
+                  onChange={(e) => setEditor({ ...editor, actual_end: e.target.value || null })}
+                  required={editor.status === "completed"}
+                  disabled={!editable}
+                />
+              </label>
+            </div>
+            {((editor.id && byId.get(editor.id)?.status === "completed" && editor.status !== "completed") ||
+              (editor.status === "in_progress" && editor.predecessor_ids.some((id: string) => byId.get(id)?.status !== "completed"))) && (
+              <label>
+                Причина отклонения от графика
+                <textarea
+                  name="reason"
+                  value={editor.reason || ""}
+                  onChange={(e) => setEditor({ ...editor, reason: e.target.value })}
+                  maxLength={1000}
+                  required
+                  disabled={!editable}
+                />
+              </label>
+            )}
             <label>Предшествующие работы</label>
             <div className="predecessor-list">
               {tasks
@@ -1798,6 +2397,7 @@ export default function Planner() {
             )}
             <p className="editor-help">
               Связь «окончание → начало». Сроки считаются в календарных днях.
+              Для завершения нужны фактические даты и принятый плановый объём.
               Все изменения записываются.
             </p>
           </form>
@@ -1983,11 +2583,16 @@ export default function Planner() {
           >
             <div className="editor-heading">
               <div>
-                <h2>{names[detail.kind] || detail.kind}</h2>
+                <h2>{eventLabel(detail)}</h2>
                 <small>
                   {detail.origin === "server"
                     ? "Подтверждено сервером"
                     : "Событие интерфейса"}{" "}
+                  · пользователь {detail.user_id || user?.id || "—"}{" "}
+                  · {new Date(detail.client_at || detail.received_at).toLocaleString("ru-RU", {
+                    dateStyle: "short",
+                    timeStyle: "medium",
+                  })}{" "}
                   · {detail.id}
                 </small>
               </div>

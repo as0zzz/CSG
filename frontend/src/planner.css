@@ -8,6 +8,14 @@
 * {
   box-sizing: border-box;
 }
+::selection {
+  color: inherit;
+  background: transparent;
+}
+::-moz-selection {
+  color: inherit;
+  background: transparent;
+}
 body {
   margin: 0;
 }
@@ -24,12 +32,22 @@ button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-[role="button"]:focus-visible {
-  outline: 3px solid #2563eb;
-  outline-offset: 2px;
+:focus,
+:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+input[type="date"]::-webkit-datetime-edit-day-field:focus,
+input[type="date"]::-webkit-datetime-edit-month-field:focus,
+input[type="date"]::-webkit-datetime-edit-year-field:focus {
+  color: inherit;
+  background: transparent;
+}
+select option:checked,
+select option:focus,
+select option:hover {
+  color: #0f172a;
+  background: #ffffff;
 }
 button {
   display: inline-flex;
@@ -136,25 +154,38 @@ p {
   margin: 0 3px;
 }
 .project-switch {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
+  flex: 0 1 350px;
+  width: 350px;
+  min-width: 0;
   max-width: 350px;
   border: 1px solid #cbd5e1;
   border-radius: 5px;
   background: #ffffff;
-  padding-right: 10px;
+  padding: 0;
   margin-left: 15px;
 }
 .project-switch select {
+  display: block;
+  flex: 1 1 auto;
   appearance: none;
   border: 0;
   background: transparent;
-  padding: 9px 10px;
+  box-sizing: border-box;
+  padding: 9px 36px 9px 10px;
   width: 100%;
-  min-width: 150px;
-  max-width: 320px;
+  min-width: 0;
+  max-width: none;
   font-size: 12px;
+}
+.project-switch > svg {
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 .profile {
   margin-left: auto;
@@ -399,11 +430,13 @@ p {
   margin-left: auto;
 }
 .toolbar-group select {
+  box-sizing: border-box;
+  width: 95px;
   font-size: 11px;
   border: 1px solid #cbd5e1;
   background: #fff;
   border-radius: 4px;
-  padding: 8px 7px;
+  padding: 8px 25px 8px 8px;
   max-width: 95px;
 }
 .compact {
@@ -626,7 +659,7 @@ p {
   cursor: pointer;
 }
 .gantt-row.selected .task-cells {
-  background: #eff6ff;
+  background: transparent;
 }
 .gantt-row:hover .task-cells {
   background: #f8fafc;
@@ -644,16 +677,29 @@ p {
 .task-title {
   border: 0;
   background: transparent;
-  display: block;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
   text-align: left;
   font-weight: 400;
   color: #1e293b;
   padding: 0 10px 0 0;
-  white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   min-width: 0;
   font-size: 11px;
+  line-height: 1.2;
+}
+.task-title > span,
+.task-title small {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  width: 100%;
+}
+.task-title small {
+  color: #64748b;
+  font-size: 9px;
 }
 .task-title:hover {
   color: #c41212;
@@ -690,9 +736,6 @@ p {
   background: #f8fafc;
   z-index: 0;
   pointer-events: none;
-}
-.gantt-row.selected .timeline-row {
-  background-color: #eff6ff;
 }
 .gantt-bar {
   position: absolute;
@@ -873,11 +916,6 @@ p {
   stroke: #dc2626;
   stroke-width: 1.6;
 }
-.network-node.selected rect,
-.network-node:focus rect {
-  stroke: #2563eb;
-  stroke-width: 2.5;
-}
 .node-code {
   fill: #1e3a8a;
   font-size: 17px;
@@ -951,6 +989,8 @@ p {
   margin-bottom: 19px;
 }
 .task-editor input,
+.task-editor select,
+.task-editor textarea,
 .planner-modal input,
 .planner-modal select,
 .ksg-login input {
@@ -962,6 +1002,29 @@ p {
   color: #1e293b;
   background: #fff;
   font-size: 12px;
+}
+.task-editor select,
+.planner-modal select,
+.recorder-tools select {
+  padding-right: 32px;
+}
+.task-editor textarea {
+  resize: vertical;
+  min-height: 72px;
+  font: inherit;
+}
+.task-editor .linear-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 17px;
+  cursor: pointer;
+}
+.task-editor .linear-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #658b4a;
 }
 .editor-grid {
   display: grid;
@@ -1179,10 +1242,11 @@ p {
   max-width: 650px;
 }
 .recorder-tools select {
+  box-sizing: border-box;
   border: 1px solid #cbd5e1;
   background: #ffffff;
   border-radius: 5px;
-  padding: 8px 10px;
+  padding: 8px 32px 8px 10px;
   font-size: 12px;
   color: #0f172a;
   width: 100%;
@@ -1418,6 +1482,8 @@ p {
     font-size: 10px;
   }
   .project-switch {
+    width: 330px;
+    flex-basis: 330px;
     max-width: 330px;
   }
   .board-heading h1 {

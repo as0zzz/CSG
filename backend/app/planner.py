@@ -1,6 +1,8 @@
 """Focused KSG scheduling API and semantic black box. No screen/key recording."""
 import json
 from datetime import date, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID
 from typing import Literal
 from fastapi import APIRouter, Depends, Request, Query
@@ -9,10 +11,10 @@ from pydantic import Field
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert
 from .db import session, Session
-from .models import Work, Project, Dependency, Contractor, Membership, User, TraceSession, TraceEvent, uid
+from .models import Work, Project, Dependency, Contractor, Axis, Membership, User, TraceSession, TraceEvent, uid
 from .schemas import Input
 from .security import current, membership, contractor_only
-from .services import fail, dump, event
+from .services import fail, dump, event, validate_work, amount
 
 router = APIRouter(prefix='/api/projects/{pid}', tags=['КСГ и чёрный ящик'])
 
@@ -20,8 +22,22 @@ router = APIRouter(prefix='/api/projects/{pid}', tags=['КСГ и чёрный �
 class TaskInput(Input):
     code: str = Field(min_length=1, max_length=40)
     title: str = Field(min_length=1, max_length=250)
+    section: str = Field(default='Основные работы', min_length=1, max_length=200)
+    contractor_id: str | None = None
+    responsible_id: str | None = None
+    linear: bool = True
+    axis_id: str | None = None
+    start_m: int | None = Field(default=None, ge=0, strict=True)
+    end_m: int | None = Field(default=None, ge=0, strict=True)
+    location: str = Field(default='', max_length=500)
     start_date: date
     duration_days: int = Field(ge=1, le=3650, strict=True)
+    actual_start: date | None = None
+    actual_end: date | None = None
+    unit: Literal['м', 'м³', 'м²', 'шт', 'т'] = 'м'
+    planned: Decimal = Field(default=Decimal('1'), gt=0, max_digits=14, decimal_places=3, allow_inf_nan=False)
+    status: Literal['planned', 'in_progress', 'suspended', 'completed'] = 'planned'
+    reason: str = Field(default='', max_length=1000)
     predecessor_ids: list[str] = Field(default_factory=list, max_length=200)
     version: int = Field(default=1, ge=1)
 
@@ -81,8 +97,14 @@ def snapshot(db, pid, user):
     ids = {w.id for w in works}
     links = list(db.scalars(select(Dependency).where(Dependency.project_id == pid,
                       Dependency.predecessor.in_(ids), Dependency.successor.in_(ids))))
-    tasks = [{'id': w.id, 'code': w.code, 'title': w.title, 'start_date': w.start_date.isoformat(),
+    tasks = [{'id': w.id, 'code': w.code, 'title': w.title, 'section': w.section,
+              'contractor_id': w.contractor_id, 'responsible_id': w.responsible_id,
+              'linear': w.linear, 'axis_id': w.axis_id, 'start_m': w.start_m, 'end_m': w.end_m,
+              'location': w.location, 'start_date': w.start_date.isoformat(),
               'end_date': w.end_date.isoformat(), 'duration_days': (w.end_date - w.start_date).days + 1,
+              'actual_start': w.actual_start.isoformat() if w.actual_start else None,
+              'actual_end': w.actual_end.isoformat() if w.actual_end else None,
+              'unit': w.unit, 'planned': str(w.planned), 'status': w.status,
               'predecessor_ids': [d.predecessor for d in links if d.successor == w.id], 'version': w.version} for w in works]
     return {'schema_version': 1, 'project_id': pid, 'tasks': tasks,
             'links': [{'id': d.id, 'from': d.predecessor, 'to': d.successor} for d in links]}
@@ -141,9 +163,53 @@ def mutation_record(db, user, pid, context, kind, payload, result):
     trace, action_id, before = context
     db.flush()
     after = snapshot(db, pid, user)
+    old_tasks = {task['id']: task for task in before['tasks']}
+    new_tasks = {task['id']: task for task in after['tasks']}
+    changes = []
+    for task_id in sorted(set(old_tasks) | set(new_tasks)):
+        old, new = old_tasks.get(task_id), new_tasks.get(task_id)
+        if old is None:
+            changes.append({'entity': 'work', 'operation': 'created', 'id': task_id, 'after': new})
+        elif new is None:
+            changes.append({'entity': 'work', 'operation': 'removed', 'id': task_id, 'before': old})
+        else:
+            fields = {key: {'before': old.get(key), 'after': new.get(key)}
+                      for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key)}
+            if fields:
+                changes.append({'entity': 'work', 'operation': 'updated', 'id': task_id, 'fields': fields})
+    old_links = {(link['from'], link['to']) for link in before['links']}
+    new_links = {(link['from'], link['to']) for link in after['links']}
+    added_links = [{'from': a, 'to': b} for a, b in sorted(new_links - old_links)]
+    removed_links = [{'from': a, 'to': b} for a, b in sorted(old_links - new_links)]
+    dependency_change = None
+    if added_links or removed_links:
+        dependency_change = {'entity': 'dependency', 'operation': 'updated',
+                             'added': added_links, 'removed': removed_links}
+        changes.append(dependency_change)
+    event_kind = kind
+    if kind == 'task.update':
+        changed_fields = {key for change in changes for key in change.get('fields', {})}
+        if 'status' in changed_fields:
+            event_kind = 'task.status'
+        elif changed_fields & {'start_date', 'end_date', 'duration_days', 'actual_start', 'actual_end'}:
+            event_kind = 'task.schedule'
+        elif changed_fields & {'planned', 'unit'}:
+            event_kind = 'task.quantity'
+        elif changed_fields & {'linear', 'axis_id', 'start_m', 'end_m', 'location'}:
+            event_kind = 'task.stationing'
+        elif changed_fields & {'responsible_id', 'contractor_id'}:
+            event_kind = 'task.assignment'
+        elif 'section' in changed_fields:
+            event_kind = 'task.classification'
+    recorded_payload = {**payload, 'requested_kind': kind, 'change_set': changes}
     db.add(TraceEvent(session_id=trace.id, project_id=pid, user_id=user.id, origin='server',
-                      kind=kind, action_id=action_id, payload=scrub(payload), result=result,
+                      kind=event_kind, action_id=action_id, payload=scrub(recorded_payload), result=result,
                       before=before, after=after, observation={}))
+    if dependency_change:
+        db.add(TraceEvent(session_id=trace.id, project_id=pid, user_id=user.id, origin='server',
+                          kind='dependency.edit', action_id=action_id,
+                          payload=scrub(dependency_change), result={'ok': True},
+                          before=before, after=after, observation={}))
 
 
 @router.get('/schedule')
@@ -151,12 +217,25 @@ def get_schedule(pid: str, db=Depends(session), user=Depends(current)):
     data = snapshot(db, pid, user)
     member = membership(db, user, pid)
     project = db.get(Project, pid)
+    editable = 'Planner' in member.roles
+    options = {'responsibles': [], 'contractors': [], 'axes': []}
+    if editable:
+        options = {
+            'responsibles': [{'id': item.id, 'name': item.name}
+                             for item in db.scalars(select(User).join(Membership, Membership.user_id == User.id)
+                                                    .where(Membership.project_id == pid).order_by(User.name))],
+            'contractors': [{'id': item.id, 'name': item.name}
+                            for item in db.scalars(select(Contractor).where(Contractor.project_id == pid).order_by(Contractor.name))],
+            'axes': [{'id': item.id, 'name': item.name, 'path': item.path,
+                      'start_m': item.start_m, 'end_m': item.end_m}
+                     for item in db.scalars(select(Axis).where(Axis.project_id == pid).order_by(Axis.name, Axis.path))],
+        }
     return {**data, 'project': {'id': pid, 'name': project.name, 'code': project.code,
                               'start_date': project.start_date.isoformat()},
-            'editable': 'Planner' in member.roles}
+            'editable': editable, 'options': options}
 
 
-def validate_task(db, pid, data, task_id=None):
+def validate_task(db, pid, data, user, task_id=None, previous=None):
     tasks = list(db.scalars(select(Work).where(Work.project_id == pid, Work.archived == False)))
     ids = {w.id for w in tasks}
     if len(data.predecessor_ids) != len(set(data.predecessor_ids)):
@@ -174,6 +253,24 @@ def validate_task(db, pid, data, task_id=None):
     if task_id:
         preds[task_id] = data.predecessor_ids
         topo(ids, preds)
+    if not data.section.strip():
+        fail('Укажите раздел КСГ')
+    contractor_id = data.contractor_id or db.scalar(select(Contractor.id).where(Contractor.project_id == pid).order_by(Contractor.name))
+    if not contractor_id:
+        contractor = Contractor(project_id=pid, name='Основной подрядчик')
+        db.add(contractor); db.flush()
+        contractor_id = contractor.id
+    responsible_id = data.responsible_id or user.id
+    candidate = SimpleNamespace(
+        contractor_id=contractor_id, responsible_id=responsible_id,
+        linear=data.linear, axis_id=data.axis_id, start_m=data.start_m, end_m=data.end_m,
+        location=data.location.strip(), start_date=data.start_date,
+        end_date=data.start_date + timedelta(days=data.duration_days - 1),
+        actual_start=data.actual_start, actual_end=data.actual_end, planned=data.planned,
+        status=data.status, reason=data.reason,
+    )
+    validate_work(db, pid, candidate, amount(db, previous.id) if previous else Decimal(0), previous)
+    return candidate
 
 
 def set_predecessors(db, pid, task_id, predecessors, user):
@@ -213,15 +310,13 @@ def new_project(pid: str, data: NewProjectInput, request: Request, db=Depends(se
 @router.post('/schedule/tasks')
 def create_task(pid: str, data: TaskInput, request: Request, db=Depends(session), user=Depends(current)):
     context = mutation_context(db, user, pid, request)
-    validate_task(db, pid, data)
-    contractor = db.scalar(select(Contractor).where(Contractor.project_id == pid))
-    if not contractor:
-        contractor = Contractor(project_id=pid, name='Основной подрядчик')
-        db.add(contractor); db.flush()
-    work = Work(project_id=pid, code=data.code, title=data.title, start_date=data.start_date,
-                end_date=data.start_date + timedelta(days=data.duration_days - 1),
-                responsible_id=user.id, contractor_id=contractor.id, linear=False,
-                location='Контрольно-сетевой график', unit='шт', planned=1)
+    candidate = validate_task(db, pid, data, user)
+    work = Work(project_id=pid, code=data.code, title=data.title, section=data.section,
+                contractor_id=candidate.contractor_id, responsible_id=candidate.responsible_id,
+                linear=candidate.linear, axis_id=candidate.axis_id, start_m=candidate.start_m,
+                end_m=candidate.end_m, location=candidate.location, start_date=candidate.start_date,
+                end_date=candidate.end_date, actual_start=candidate.actual_start, actual_end=candidate.actual_end,
+                unit=data.unit, planned=data.planned, status=data.status)
     db.add(work); db.flush()
     set_predecessors(db, pid, work.id, data.predecessor_ids, user)
     event(db, user, pid, 'Создана работа КСГ', work)
@@ -238,10 +333,15 @@ def update_task(pid: str, wid: str, data: TaskInput, request: Request, db=Depend
         fail('Работа не найдена', 404)
     if work.version != data.version:
         fail('График уже изменился. Обновите его и повторите действие.', 409)
-    validate_task(db, pid, data, wid)
+    candidate = validate_task(db, pid, data, user, wid, work)
     before = dump(work)
-    work.code, work.title, work.start_date = data.code, data.title, data.start_date
-    work.end_date = data.start_date + timedelta(days=data.duration_days - 1)
+    work.code, work.title, work.section = data.code, data.title, data.section
+    work.contractor_id, work.responsible_id = candidate.contractor_id, candidate.responsible_id
+    work.linear, work.axis_id = candidate.linear, candidate.axis_id
+    work.start_m, work.end_m, work.location = candidate.start_m, candidate.end_m, candidate.location
+    work.start_date, work.end_date = candidate.start_date, candidate.end_date
+    work.actual_start, work.actual_end = candidate.actual_start, candidate.actual_end
+    work.unit, work.planned, work.status = data.unit, data.planned, data.status
     work.version += 1
     set_predecessors(db, pid, wid, data.predecessor_ids, user)
     event(db, user, pid, 'Изменена работа КСГ', work, before)
@@ -350,9 +450,14 @@ def list_sessions(pid: str, db=Depends(session), user=Depends(current)):
 
 
 @router.get('/recorder/sessions/{sid}/events')
-def list_events(pid: str, sid: str, after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), db=Depends(session), user=Depends(current)):
+def list_events(pid: str, sid: str, after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
+                latest: bool = Query(False), db=Depends(session), user=Depends(current)):
     trace_owner(db, user, pid, sid, admin=True)
-    rows = list(db.scalars(select(TraceEvent).where(TraceEvent.session_id == sid, TraceEvent.ordinal > after).order_by(TraceEvent.ordinal).limit(limit)))
+    query = select(TraceEvent).where(TraceEvent.session_id == sid)
+    if latest:
+        rows = list(db.scalars(query.order_by(TraceEvent.ordinal.desc()).limit(limit)))
+    else:
+        rows = list(db.scalars(query.where(TraceEvent.ordinal > after).order_by(TraceEvent.ordinal).limit(limit)))
     total = db.scalar(select(func.count()).select_from(TraceEvent).where(TraceEvent.session_id == sid))
     return {'items': [dump(e) for e in rows], 'total': total, 'cursor': rows[-1].ordinal if rows else after}
 

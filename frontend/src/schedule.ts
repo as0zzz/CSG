@@ -2,11 +2,29 @@ export interface Task {
   id: string;
   code: string;
   title: string;
+  section: string;
+  contractor_id: string;
+  responsible_id: string;
+  linear: boolean;
+  axis_id: string | null;
+  start_m: number | null;
+  end_m: number | null;
+  location: string;
   start_date: string;
   end_date: string;
   duration_days: number;
+  actual_start: string | null;
+  actual_end: string | null;
+  unit: "м" | "м³" | "м²" | "шт" | "т";
+  planned: string;
+  status: "planned" | "in_progress" | "suspended" | "completed";
   predecessor_ids: string[];
   version: number;
+}
+export interface ScheduleOptions {
+  responsibles: { id: string; name: string }[];
+  contractors: { id: string; name: string }[];
+  axes: { id: string; name: string; path: string; start_m: number; end_m: number }[];
 }
 export interface Schedule {
   project_id: string;
@@ -14,6 +32,7 @@ export interface Schedule {
   tasks: Task[];
   links: { id: string; from: string; to: string }[];
   editable: boolean;
+  options: ScheduleOptions;
 }
 export const DAY = 86400000;
 export const day = (value: string) => Date.parse(value + "T00:00:00Z") / DAY;
